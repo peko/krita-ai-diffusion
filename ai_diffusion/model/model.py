@@ -13,7 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, NamedTuple
 
-from PyQt6.QtCore import QMetaObject, QObject, Qt, QUuid, pyqtSignal
+from PyQt6.QtCore import QMetaObject, QObject, Qt, QTimer, QUuid, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QPainter
 
 from .. import eventloop, util
@@ -486,7 +486,7 @@ class DocumentModel(QObject, ObservableProperties):
             workflow_kind = WorkflowKind.refine_region
             bounds, mask.bounds = compute_relative_bounds(mask.bounds, mask.bounds)
         if mask is not None or workflow_kind is WorkflowKind.refine:
-            image = self._get_current_image(bounds, exclude_internal=False)
+            image = self.live.capture_input(bounds)
 
         conditioning, job_regions = process_regions(regions, bounds)
         conditioning.language = self.prompt_translation_language
@@ -1243,10 +1243,14 @@ class LiveWorkspace(QObject, ObservableProperties):
     is_recording = Property(False, setter="toggle_record")
     strength = Property(0.3, persist=True)
     has_result = Property(False)
+    active_layer_input = Property(False, persist=True)
+    canvas_preview = Property(False, persist=True, setter="set_canvas_preview")
 
     is_active_changed = pyqtSignal(bool)
     is_recording_changed = pyqtSignal(bool)
     strength_changed = pyqtSignal(float)
+    active_layer_input_changed = pyqtSignal(bool)
+    canvas_preview_changed = pyqtSignal(bool)
     seed_changed = pyqtSignal(int)
     has_result_changed = pyqtSignal(bool)
     result_available = pyqtSignal(Image)
@@ -1263,6 +1267,10 @@ class LiveWorkspace(QObject, ObservableProperties):
         self._keyframe_start = 0
         self._keyframe_index = 0
         self._keyframes: list[Path] = []
+        self._preview_layer: Layer | None = None
+        self._pending_preview: tuple[Image, JobParams] | None = None
+        self._preview_retry_scheduled = False
+        self._input_layer_id: QUuid | None = None
         model.jobs.job_finished.connect(self.handle_job_finished)
 
     @property
@@ -1335,6 +1343,88 @@ class LiveWorkspace(QObject, ObservableProperties):
     def result_composition(self):
         return self._result_composition
 
+    _preview_layer_name = "[Live Preview]"
+
+    def capture_input(self, bounds: Bounds) -> Image:
+        if self.active_layer_input and (layer := self._input_layer()):
+            pixels = layer.get_pixels(bounds)
+            # transparent areas would reach the model as black
+            image = Image.create(bounds.extent, fill=QColor(255, 255, 255))
+            image.draw_image(pixels)
+            return image
+        return self.model._get_current_image(bounds, exclude_internal=False)
+
+    def _input_layer(self) -> Layer | None:
+        layers = self.model.layers
+        active = layers.active
+        while active.type.is_mask and (parent := active.parent_layer):
+            active = parent
+        if active != self._find_preview_layer():
+            self._input_layer_id = active.id
+            return active
+        # the preview layer itself is selected: keep using the previous input layer
+        if self._input_layer_id is not None:
+            return layers.find(self._input_layer_id)
+        return None
+
+    def set_canvas_preview(self, value: bool):
+        if value == self.canvas_preview:
+            return
+        if not value and (layer := self._find_preview_layer()):
+            layer.remove()
+        self._preview_layer = None
+        self._canvas_preview = value
+        self.canvas_preview_changed.emit(value)
+        self.modified.emit(self, "canvas_preview")
+        self._pending_preview = None
+        if value and self._result is not None and self._result_params is not None:
+            self._queue_preview(self._result, self._result_params)
+
+    def _queue_preview(self, image: Image, params: JobParams):
+        self._pending_preview = (image, params)
+        self._flush_preview()
+
+    def _flush_preview(self):
+        # Any layer update via the Krita API waits for running strokes to finish, which
+        # freezes the UI mid-stroke. Only write the preview while the image is idle.
+        self._preview_retry_scheduled = False
+        if self._pending_preview is None or not self.canvas_preview:
+            return
+        if (model := self._model()) is None:
+            return  # document was closed while waiting
+        if kdoc := getattr(model.document, "_doc", None):
+            if not kdoc.tryBarrierLock():
+                self._preview_retry_scheduled = True
+                QTimer.singleShot(50, self._flush_preview)
+                return
+            kdoc.unlock()
+        image, params = self._pending_preview
+        self._pending_preview = None
+        self._update_preview_layer(image, params)
+
+    def _find_preview_layer(self) -> Layer | None:
+        if self._preview_layer and self._preview_layer.was_removed:
+            self._preview_layer = None
+        if self._preview_layer is None and self.canvas_preview:
+            # pick up a preview layer saved with the document in an earlier session
+            name = self._preview_layer_name
+            self._preview_layer = next((l for l in self.model.layers.all if l.name == name), None)
+        return self._preview_layer
+
+    def _update_preview_layer(self, image: Image, params: JobParams):
+        bounds = Bounds(*params.bounds.offset, *image.extent)
+        if layer := self._find_preview_layer():
+            # keeps the user's blend mode, opacity and visibility
+            # silent: Layer.refresh() re-sets the blend mode, which adds an undo entry each frame
+            layer.write_pixels(image, bounds, make_visible=False, silent=True)
+            if layer.is_visible and (kdoc := getattr(self.model.document, "_doc", None)):
+                kdoc.refreshProjection()
+        else:
+            name = self._preview_layer_name
+            layer = self.model.layers.create(name, image, bounds, make_active=False)
+            layer.is_locked = True
+            self._preview_layer = layer
+
     def set_result(self, value: Image, params: JobParams):
         canvas = self.model._get_current_image(params.bounds, exclude_internal=False)
         painter = QPainter(canvas._qimage)
@@ -1349,6 +1439,12 @@ class LiveWorkspace(QObject, ObservableProperties):
         self._result_params = params
         self.result_available.emit(canvas)
         self.has_result = True
+
+        if self.canvas_preview:
+            if self._preview_retry_scheduled:
+                self._pending_preview = (value, params)  # retry timer picks up the newest frame
+            else:
+                self._queue_preview(value, params)
 
         if self.is_recording:
             self._save_frame(value, params.bounds)

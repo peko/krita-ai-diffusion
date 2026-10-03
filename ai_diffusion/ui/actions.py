@@ -9,7 +9,7 @@ def generate():
         elif model.workspace is Workspace.upscaling:
             model.upscale_image()
         elif model.workspace is Workspace.live:
-            model.generate_live()
+            model.generate_seed()
         elif model.workspace is Workspace.animation:
             model.animation.generate()
         elif model.workspace is Workspace.custom:

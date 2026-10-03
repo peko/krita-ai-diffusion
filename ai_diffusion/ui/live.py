@@ -152,6 +152,29 @@ class LiveWidget(QWidget):
         self.apply_layer_button.setToolTip(_("Create a new layer with the current result"))
         self.apply_layer_button.clicked.connect(self.apply_result_layer)
 
+        self.active_layer_input_button = QToolButton(self)
+        self.active_layer_input_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.active_layer_input_button.setIcon(theme.icon("context-layer"))
+        self.active_layer_input_button.setAutoRaise(True)
+        self.active_layer_input_button.setCheckable(True)
+        self.active_layer_input_button.setToolTip(
+            _("Use only the active layer (or group) as live input, instead of the whole canvas")
+        )
+        self.active_layer_input_button.toggled.connect(self.toggle_active_layer_input)
+
+        self.canvas_preview_button = QToolButton(self)
+        self.canvas_preview_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.canvas_preview_button.setIcon(theme.icon("copy-image"))
+        self.canvas_preview_button.setAutoRaise(True)
+        self.canvas_preview_button.setCheckable(True)
+        self.canvas_preview_button.setToolTip(
+            _(
+                "Show each live result in a [Live Preview] layer on the canvas.\n"
+                "Use together with active layer input, otherwise the preview feeds back into the input."
+            )
+        )
+        self.canvas_preview_button.toggled.connect(self.toggle_canvas_preview)
+
         self.style_select = StyleSelectWidget(self)
 
         controls_layout = QHBoxLayout()
@@ -160,6 +183,8 @@ class LiveWidget(QWidget):
         controls_layout.addWidget(self.record_button)
         controls_layout.addWidget(self.apply_button)
         controls_layout.addWidget(self.apply_layer_button)
+        controls_layout.addWidget(self.active_layer_input_button)
+        controls_layout.addWidget(self.canvas_preview_button)
         controls_layout.addWidget(self.style_select)
         layout.addLayout(controls_layout)
 
@@ -260,6 +285,10 @@ class LiveWidget(QWidget):
                 model.live.is_recording_changed.connect(self.update_is_recording),
                 model.live.has_result_changed.connect(self.apply_button.setEnabled),
                 model.live.has_result_changed.connect(self.apply_layer_button.setEnabled),
+                model.live.active_layer_input_changed.connect(
+                    self.active_layer_input_button.setChecked
+                ),
+                model.live.canvas_preview_changed.connect(self.canvas_preview_button.setChecked),
                 self.random_seed_button.clicked.connect(model.generate_seed),
                 model.edit_mode_changed.connect(self.update_edit_mode),
                 model.progress_changed.connect(self.update_progress),
@@ -269,6 +298,8 @@ class LiveWidget(QWidget):
             ]
             self.apply_button.setEnabled(model.live.has_result)
             self.apply_layer_button.setEnabled(model.live.has_result)
+            self.active_layer_input_button.setChecked(model.live.active_layer_input)
+            self.canvas_preview_button.setChecked(model.live.canvas_preview)
             self.prompt_widget.region = model.active_regions
             self.region_widget.root = model.active_regions
             self.strength_slider.model = model
@@ -283,6 +314,12 @@ class LiveWidget(QWidget):
 
     def toggle_record(self):
         self.model.live.is_recording = not self.model.live.is_recording
+
+    def toggle_active_layer_input(self, checked: bool):
+        self.model.live.active_layer_input = checked
+
+    def toggle_canvas_preview(self, checked: bool):
+        self.model.live.canvas_preview = checked
 
     def toggle_edit(self):
         self.model.edit_mode = not self.model.edit_mode
