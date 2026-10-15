@@ -27,6 +27,19 @@ class UpdateState(Enum):
     failed_update = 9
 
 
+def parse_version(version: str):
+    """Turn "1.54.0" / "v1.54.0-pre" into a sortable tuple.
+    A pre-release suffix sorts before the final release of the same number."""
+    version = version.strip().lstrip("vV")
+    number, _, suffix = version.partition("-")
+    parts = tuple(int(p) if p.isdigit() else 0 for p in number.split("."))
+    return parts, 0 if suffix else 1
+
+
+def is_newer(candidate: str, current: str):
+    return parse_version(candidate) > parse_version(current)
+
+
 class UpdatePackage(NamedTuple):
     version: str
     url: str
@@ -79,7 +92,8 @@ class AutoUpdate(QObject, ObservableProperties):
             log.error(f"Invalid plugin update information: {result}")
             self.state = UpdateState.failed_check
             self.error = "Failed to retrieve plugin update information"
-        elif self.latest_version == self.current_version:
+        elif not is_newer(self.latest_version, self.current_version):
+            # also covers a development build which is ahead of the latest release
             log.info("Plugin is up to date!")
             self.state = UpdateState.latest
         elif "url" not in result or "sha256" not in result:
@@ -128,7 +142,9 @@ class AutoUpdate(QObject, ObservableProperties):
 
     @property
     def is_available(self):
-        return self.latest_version is not None and self.latest_version != self.current_version
+        return self.latest_version is not None and is_newer(
+            self.latest_version, self.current_version
+        )
 
     @property
     def _net(self):
