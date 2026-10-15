@@ -5,7 +5,7 @@ import pytest
 from aiohttp import ClientSession
 from PyQt6.QtCore import pyqtBoundSignal
 
-from ai_diffusion.model.updates import AutoUpdate, UpdateState
+from ai_diffusion.model.updates import AutoUpdate, UpdateState, is_newer, parse_version
 from ai_diffusion.platform_tools import ZipFile
 
 from .conftest import CloudService, qtapp
@@ -27,6 +27,18 @@ def http_session(service_url: str):
     service_token = os.environ["INTERSTICE_INFRA_TOKEN"]
     headers = {"Authorization": f"Bearer {service_token}"}
     return ClientSession(service_url, headers=headers)
+
+
+def test_version_compare():
+    assert parse_version("1.54.0") == ((1, 54, 0), 1)
+    assert parse_version("v1.54.0-pre") == ((1, 54, 0), 0)
+    assert is_newer("1.54.0", "1.53.0")
+    assert is_newer("1.53.1", "1.53.0")
+    assert is_newer("2.0.0", "1.99.9")
+    assert is_newer("1.54.0", "1.54.0-pre")
+    assert not is_newer("1.53.0", "1.53.0")
+    assert not is_newer("1.53.0", "1.54.0")  # development build ahead of latest release
+    assert not is_newer("1.54.0-pre", "1.54.0")
 
 
 @qtapp
